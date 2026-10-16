@@ -1,0 +1,21 @@
+programma_client.py <- Windows 11 di tommy
+programma_server.py <- Windows 11 di tommy
+
+programma_client.py <- Windows 11 di tommy
+programma_server.py <- OpenAI
+
+IP      :port     :endpoint 
+macchina:programma:azione 
+
+https://api.anthropic.com/   v1/messages
+
+programma_server.py
+"v1/messages" <- endpoint
+azioni ...    <- azioni specifiche per l'endpoint
+
+"v1/help"
+azioni ...
+
+"v1/status"
+azioni ...
+

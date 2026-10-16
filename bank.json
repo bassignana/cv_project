@@ -1,0 +1,75 @@
+{
+  "roles": [
+    {
+      "id": "r1",
+      "title": "Marketing Data Intern",
+      "company": "Acme Srl",
+      "dates": "Feb 2025 - Jul 2025",
+      "bullets": [
+        {
+          "id": "b1",
+          "text": "Built weekly sales dashboards in Tableau used by a team of 12."
+        },
+        {
+          "id": "b2",
+          "text": "Cleaned and merged 3 customer datasets with SQL, cutting report preparation time by 30%."
+        },
+        {
+          "id": "b3",
+          "text": "Presented monthly campaign results to the marketing manager and suggested budget changes."
+        },
+        {
+          "id": "b4",
+          "text": "Automated a weekly CSV import with a Python pandas script."
+        }
+      ]
+    },
+    {
+      "id": "r2",
+      "title": "Student Assistant",
+      "company": "University of Bologna",
+      "dates": "Sep 2023 - Jan 2025",
+      "bullets": [
+        {
+          "id": "b5",
+          "text": "Answered around 40 student emails per week about enrolment procedures."
+        },
+        {
+          "id": "b6",
+          "text": "Kept the department's event calendar up to date in Excel."
+        },
+        {
+          "id": "b7",
+          "text": "Coordinated room bookings with 4 department offices."
+        },
+        {
+          "id": "b8",
+          "text": "Wrote a short guide for new assistants on the ticketing system."
+        }
+      ]
+    }
+  ],
+  "free": [
+    {
+      "id": "f1",
+      "skill": "Italian",
+      "text": "native",
+      "attach_to": ""
+    }
+  ],
+  "skills": [
+    "SQL",
+    "Python (pandas)",
+    "Tableau",
+    "Excel",
+    "English (C1)",
+    "Italian (native)",
+    "Italian"
+  ],
+  "education": [
+    "BSc Economics and Management - University of Bologna, 2025"
+  ],
+  "name": "Giulia Rossi",
+  "email": "giulia.rossi@example.com",
+  "location": "Bologna, Italy"
+}

@@ -55,6 +55,30 @@
       "skill": "Italian",
       "text": "native",
       "attach_to": ""
+    },
+    {
+      "id": "f2",
+      "skill": "Power Query",
+      "text": "test answare",
+      "attach_to": ""
+    },
+    {
+      "id": "f3",
+      "skill": "data science",
+      "text": "test data science",
+      "attach_to": ""
+    },
+    {
+      "id": "f4",
+      "skill": "business intelligence",
+      "text": "test bu",
+      "attach_to": ""
+    },
+    {
+      "id": "f5",
+      "skill": "multitasking",
+      "text": "testo",
+      "attach_to": "r1"
     }
   ],
   "skills": [
@@ -64,7 +88,11 @@
     "Excel",
     "English (C1)",
     "Italian (native)",
-    "Italian"
+    "Italian",
+    "Power Query",
+    "data science",
+    "business intelligence",
+    "multitasking"
   ],
   "education": [
     "BSc Economics and Management - University of Bologna, 2025"

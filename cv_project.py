@@ -169,10 +169,17 @@ MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
 #
 # A model left in the kernel by an earlier cell is only reused if it is this
-# exact model; anything else is replaced.
+# exact model; anything else is replaced. Loading is lazy, so importing this
+# file (e.g. from streamlit_app.py) does not load the model.
 #
-loaded_model = globals().get("model")
-if loaded_model is None or loaded_model.name_or_path != MODEL_ID:
+tokenizer = globals().get("tokenizer")
+model = globals().get("model")
+
+
+def load_model() -> None:
+    global tokenizer, model
+    if model is not None and model.name_or_path == MODEL_ID:
+        return
     # Downloaded once from Hugging Face Hub and cached
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     model = AutoModelForCausalLM.from_pretrained(
@@ -183,13 +190,14 @@ if loaded_model is None or loaded_model.name_or_path != MODEL_ID:
     # Load on CPU first, then move: device_map="auto" segfaulted on macOS
     if torch.cuda.is_available():
         model = model.to("cuda")
-device = model.device
 
 
 def get_no_history_llm_response(prompt: str, max_new_tokens: int = 200) -> str:
     #
     # One deterministic call to the local model. Returns plain text.
     #
+    load_model()
+    device = model.device
     message = [
         {"role": "system", "content": "You are a careful CV assistant. Follow the requested "
                                       "output format exactly and never invent facts."},
@@ -297,6 +305,19 @@ def skill_listed(requirement: str, skills: list[str]) -> bool:
     return any(req in s.lower() or (len(s) > 2 and s.lower().split(" (")[0] in req) for s in skills)
 
 
+def words_in_text(requirement: str, text: str) -> bool:
+    #
+    # True when every word of the requirement appears in text. Words match by
+    # their first 4 letters, so "dashboard" finds "dashboards".
+    #
+    text_words = [w.strip(VERDICT_PUNCTUATION) for w in text.lower().split()]
+    for word in requirement.lower().split():
+        word = word.strip(VERDICT_PUNCTUATION)
+        if word and not any(t.startswith(word[:4]) for t in text_words):
+            return False
+    return True
+
+
 def parse_verdict(raw: str) -> tuple[str, str]:
     #
     # Reads "YES b2", "PARTIAL: b4" or "NO" from the model's reply. Returns the
@@ -329,17 +350,28 @@ def check_requirement(requirement: str, bullets: list[dict], skills: list[str]) 
     prompt = (
         f"Job requirement: {requirement}\n\n"
         f"Candidate statements:\n{statements}\n\n"
-        "Does any statement show this requirement? Reply with ONE line only, in one of these formats:\n"
-        "YES <statement id>      (a statement clearly shows it)\n"
-        "PARTIAL <statement id>  (a statement is related, but does not clearly show it)\n"
+        "Decide whether ONE statement above is direct proof that the candidate has this exact requirement.\n"
+        "Rules:\n"
+        "- A tool or technology only counts if the statement names that same tool. "
+        "A similar tool is NOT a match (Tableau is not Power BI, Excel is not SQL).\n"
+        "- A soft skill or task only counts if the statement describes the candidate doing it. "
+        "Being in the same general area (dashboards, data) is NOT a match.\n"
+        "- Most requirements are NOT proven. Only answer YES when you can point at the words in the statement.\n"
+        "Reply with ONE line only, in one of these formats:\n"
+        "YES <statement id>      (the statement itself shows it)\n"
+        "PARTIAL <statement id>  (related, but does not show it)\n"
         "NO                      (nothing shows it)\n"
-        "Do not guess. If unsure, answer NO."
+        "If unsure, answer NO."
     )
     verdict, cited_id = parse_verdict(get_no_history_llm_response(prompt, 12))
     valid_ids = {b["id"].lower(): b["id"] for b in bullets}
     if verdict in ("YES", "PARTIAL") and cited_id.lower() in valid_ids:
-        status = "demonstrated" if verdict == "YES" else "partial"
-        return status, valid_ids[cited_id.lower()]
+        bullet_id = valid_ids[cited_id.lower()]
+        cited_text = next(b["text"] for b in bullets if b["id"] == bullet_id)
+        # a small model says YES too easily: the cited statement must contain every word of the requirement
+        if verdict == "YES" and words_in_text(requirement, cited_text):
+            return "demonstrated", bullet_id
+        return "partial", bullet_id
     if skill_listed(requirement, skills):
         return "partial", ""  # listed as a skill, but no experience shows it
     return "missing", ""
@@ -370,31 +402,38 @@ def analyze_gaps(bank: dict, requirements: list[str]) -> list[dict]:
     return rows
 
 
-def ask_student(gaps: list[dict], bank: dict) -> int:
+def add_answer(row: dict, answer: str, bank: dict, attach_to: str = "") -> bool:
     #
-    # Each answer becomes a new entry in the free section of the bank, tagged
-    # with the skill it answers. The skill is also added to the skills list
+    # The answer becomes a new entry in the free section of the bank, tagged
+    # with the skill it answers. attach_to is a role id to show it under that
+    # role, or "" for the free section. The skill is also added to the skills list
     # so it counts as listed next time. The caller saves the bank to disk.
     # The answered gap row is marked demonstrated by the new entry right here,
     # which is what a re-check would conclude anyway (the tagged skill
     # matches), so no second round of model calls is needed.
+    # Returns False when the answer means "skip".
     #
+    answer = answer.strip()
+    if answer.lower().strip(" .!") in SKIP_ANSWERS:  # "no", "No.", "n/a"... mean skip, never a bullet
+        return False
+    new_id = next_free_id(bank)
+    bank["free"].append({"id": new_id, "skill": row["requirement"], "text": answer, "attach_to": attach_to})
+    row.update(status="demonstrated", bullet=new_id, evidence=answer, question="")
+    known_skills = [skill.lower() for skill in bank["skills"]]
+    if row["requirement"].lower() not in known_skills:
+        bank["skills"].append(row["requirement"])
+    return True
+
+
+def ask_student(gaps: list[dict], bank: dict) -> int:
     added = 0
     print("\nAnswer honestly, or type 'no' (or press Enter) to skip. Answers are saved to the bank and go into the CV")
     print("exactly as you type them: write each as a finished CV sentence, starting with an action verb.")
     for row in gaps:
         if row["status"] == "demonstrated":
             continue
-        answer = input(f"\n{row['question']}\n> ").strip()
-        if answer.lower().strip(" .!") in SKIP_ANSWERS:  # "no", "No.", "n/a"... mean skip, never a bullet
-            continue
-        new_id = next_free_id(bank)
-        bank["free"].append({"id": new_id, "skill": row["requirement"], "text": answer, "attach_to": ""})
-        row.update(status="demonstrated", bullet=new_id, evidence=answer, question="")
-        known_skills = [skill.lower() for skill in bank["skills"]]
-        if row["requirement"].lower() not in known_skills:
-            bank["skills"].append(row["requirement"])
-        added += 1
+        if add_answer(row, input(f"\n{row['question']}\n> "), bank):
+            added += 1
     return added
 
 # ---------------------------------------------------------------------
@@ -553,4 +592,21 @@ def main() -> None:
         print(f"Saved {CV_MARKDOWN_PATH} and {CV_PDF_PATH}")
 
 
-main()
+#
+# In a Colab cell __name__ is also "__main__", so the cell still runs main().
+# `streamlit run cv_project.py` lands here too: it gets the chat app in
+# streamlit_app.py instead of questions asked in the terminal.
+#
+def running_in_streamlit() -> bool:
+    if "streamlit" not in sys.modules:
+        return False
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    return get_script_run_ctx() is not None
+
+
+if __name__ == "__main__":
+    if running_in_streamlit():
+        import runpy
+        runpy.run_path(str(Path(__file__).with_name("streamlit_app.py")))
+    else:
+        main()

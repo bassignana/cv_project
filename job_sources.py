@@ -25,6 +25,7 @@ import requests
 CACHE_MAX_AGE_HOURS = 12
 LINKEDIN_QUERY = 'site:linkedin.com/jobs/view "data analyst" "Italy"'
 LINKEDIN_MAX_RESULTS = 10
+LINKEDIN_TIMELIMIT = "m"            # search only pages indexed in the last d(ay), w(eek), m(onth), y(ear); None = any time
 LINKEDIN_PAGES_WANTED = 5
 LINKEDIN_PAGE_DELAY_SECONDS = 3
 LINKEDIN_SEARCH_ATTEMPTS = 4
@@ -66,14 +67,19 @@ def clean_remotive_html(raw: str) -> str:
     return "\n".join(lines)
 
 
-def cached_download(source_name: str, download) -> list[dict]:
+def cached_download(source_name: str, download, refresh: bool | None = None) -> list[dict]:
     #
     # Caches a source's raw listings in <source_name>_cache.json, so reruns
     # don't hit its API. download() is only called when the cache is stale.
+    # refresh=True always downloads, refresh=False uses any existing cache
+    # whatever its age, None (default) decides by CACHE_MAX_AGE_HOURS.
     #
     cache_path = Path(f"{source_name}_cache.json")
-    fresh = (cache_path.exists()
-             and time.time() - cache_path.stat().st_mtime < CACHE_MAX_AGE_HOURS * 3600)
+    if refresh is None:
+        fresh = (cache_path.exists()
+                 and time.time() - cache_path.stat().st_mtime < CACHE_MAX_AGE_HOURS * 3600)
+    else:
+        fresh = cache_path.exists() and not refresh
     if fresh:
         return json.loads(cache_path.read_text(encoding="utf-8"))
     raw_jobs = download()
@@ -106,12 +112,12 @@ def normalize_remotive(raw_job: dict) -> dict:
     }
 
 
-def fetch_remotive_jobs() -> list[dict]:
-    return [normalize_remotive(raw_job) for raw_job in cached_download("remotive", download_remotive)]
+def fetch_remotive_jobs(refresh: bool | None = None) -> list[dict]:
+    return [normalize_remotive(raw_job) for raw_job in cached_download("remotive", download_remotive, refresh)]
 
 # ---------------------------------------------------------------------
 # LINKEDIN - no API: a web search (ddgs) finds public job pages, which are
-#   then downloaded one by one until LINKEDIN_PAGES_WANTED usable pages are
+#   then downloaded one by one until LINKEDIN_PAGES_WANTED new usable pages are
 #   collected (search results come from LINKEDIN_QUERY). Public pages only, no login; listings link
 #   back to LinkedIn.
 # ---------------------------------------------------------------------
@@ -145,6 +151,15 @@ def page_text(raw_page: str, marker: str) -> str:
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", raw_page[text_start:text_end])).split())
 
 
+def linkedin_job_id(url: str) -> str:
+    #
+    # The numeric id ends the path of a job link, whatever the country
+    # subdomain or tracking parameters ("it.linkedin.com/jobs/view/...-4469608716?trk=x").
+    #
+    match = re.search(r"[-/](\d{6,})/?(?:[?#]|$)", url)
+    return match.group(1) if match else url.split("?")[0]
+
+
 def search_linkedin_urls() -> list[str]:
     #
     # backend="auto" on purpose: ddgs's duckduckgo and brave backends alone
@@ -156,7 +171,8 @@ def search_linkedin_urls() -> list[str]:
     urls = []
     for attempt in range(LINKEDIN_SEARCH_ATTEMPTS):
         try:
-            results = DDGS().text(LINKEDIN_QUERY, max_results=LINKEDIN_MAX_RESULTS, backend="auto")
+            results = DDGS().text(LINKEDIN_QUERY, max_results=LINKEDIN_MAX_RESULTS, backend="auto",
+                                  timelimit=LINKEDIN_TIMELIMIT)
         except Exception:  # ddgs raises when a search finds nothing
             results = []
         for result in results:
@@ -168,39 +184,77 @@ def search_linkedin_urls() -> list[str]:
     return urls
 
 
-def download_linkedin() -> list[dict]:
-    #
-    # Goes through the search results until LINKEDIN_PAGES_WANTED pages have
-    # downloaded with a description block. Pages that answer 429 or come back
-    # without a description are skipped.
-    #
-    raw_jobs = []
-    for url in search_linkedin_urls():
-        response = requests.get(url, headers=LINKEDIN_HEADERS, timeout=30)
-        if response.status_code == 200 and "show-more-less-html__markup" in response.text:
-            raw_jobs.append({"url": url, "page": response.text, "fetched": time.strftime("%Y-%m-%d")})
-        if len(raw_jobs) >= LINKEDIN_PAGES_WANTED:
-            break
-        time.sleep(LINKEDIN_PAGE_DELAY_SECONDS)
-    return raw_jobs
-
-
-def normalize_linkedin(raw_job: dict) -> dict:
-    page = raw_job["page"]
+def normalize_linkedin(url: str, page: str, fetched: str) -> dict:
     return {
         "title": page_text(page, "top-card-layout__title"),
         "company": page_text(page, "topcard__org-name-link"),
         "location": page_text(page, "topcard__flavor topcard__flavor--bullet"),
-        "url": raw_job["url"],
+        "url": url,
         "description": clean_linkedin_html(page),
         "tags": [],
-        "published": raw_job["fetched"],  # the page only says "2 days ago"
+        "published": fetched,  # the page only says "2 days ago"
         "source": "LinkedIn",
     }
 
 
-def fetch_linkedin_jobs() -> list[dict]:
-    return [normalize_linkedin(raw_job) for raw_job in cached_download("linkedin", download_linkedin)]
+def download_linkedin(known_ids: set[str]) -> list[dict]:
+    #
+    # Goes through the search results until LINKEDIN_PAGES_WANTED NEW pages
+    # have downloaded with a description block. Jobs whose id is already in
+    # the cache are never requested again. Pages that answer 429 or come back
+    # without a description are skipped. Only the normalized job is kept, not
+    # the page.
+    #
+    new_jobs = []
+    for url in search_linkedin_urls():
+        if linkedin_job_id(url) in known_ids:
+            continue
+        response = requests.get(url, headers=LINKEDIN_HEADERS, timeout=30)
+        if response.status_code == 200 and "show-more-less-html__markup" in response.text:
+            new_jobs.append(normalize_linkedin(url, response.text, time.strftime("%Y-%m-%d")))
+            known_ids.add(linkedin_job_id(url))
+        if len(new_jobs) >= LINKEDIN_PAGES_WANTED:
+            break
+        time.sleep(LINKEDIN_PAGE_DELAY_SECONDS)
+    return new_jobs
+
+
+def load_linkedin_cache(cache_path: Path) -> list[dict]:
+    #
+    # Reads the cache. An older cache holds the whole page of each job
+    # ({"url", "page", "fetched"}); those entries are converted to the compact
+    # job shape, duplicates are dropped, and the file is rewritten.
+    #
+    if not cache_path.exists():
+        return []
+    entries = json.loads(cache_path.read_text(encoding="utf-8"))
+    jobs, seen_ids = [], set()
+    for entry in entries:
+        job = normalize_linkedin(entry["url"], entry["page"], entry["fetched"]) if "page" in entry else entry
+        if linkedin_job_id(job["url"]) not in seen_ids:
+            seen_ids.add(linkedin_job_id(job["url"]))
+            jobs.append(job)
+    if any("page" in entry for entry in entries) or len(jobs) != len(entries):
+        cache_path.write_text(json.dumps(jobs), encoding="utf-8")
+    return jobs
+
+
+def fetch_linkedin_jobs(refresh: bool | None = None) -> list[dict]:
+    #
+    # Same refresh rules as cached_download, but a download adds its new jobs
+    # to the cache instead of replacing it.
+    #
+    cache_path = Path("linkedin_cache.json")
+    jobs = load_linkedin_cache(cache_path)
+    if refresh is None:
+        refresh = not (cache_path.exists()
+                       and time.time() - cache_path.stat().st_mtime < CACHE_MAX_AGE_HOURS * 3600)
+    if refresh or not jobs:
+        new_jobs = download_linkedin({linkedin_job_id(job["url"]) for job in jobs})
+        if new_jobs:
+            jobs += new_jobs
+            cache_path.write_text(json.dumps(jobs), encoding="utf-8")
+    return jobs
 
 # ---------------------------------------------------------------------
 # REGISTRY
@@ -211,8 +265,8 @@ SOURCES = {
 }
 
 
-def fetch_jobs(source_names: list[str] = ("linkedin",)) -> list[dict]:
+def fetch_jobs(source_names: list[str] = ("linkedin",), refresh: bool | None = None) -> list[dict]:
     jobs = []
     for source_name in source_names:
-        jobs.extend(SOURCES[source_name]())
+        jobs.extend(SOURCES[source_name](refresh))
     return jobs
